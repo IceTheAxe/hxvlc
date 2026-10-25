@@ -18,7 +18,13 @@
 
 	<target id="haxe">
 		<section if="windows">
-			<section if="HXCPP_M64">
+			<!-- hxcpp 在 HXCPP_ARM64 时会自动置 HXCPP_M64=1，所以 x64 分支必须排除 ARM64，
+			     否则 arm64 链接会把 x64 导入库链进去（LNK1112）。 -->
+			<section if="HXCPP_ARM64">
+				<lib name="${PROJECT_DIR}/lib/Windows/arm64/libvlc.lib" />
+				<lib name="${PROJECT_DIR}/lib/Windows/arm64/libvlccore.lib" />
+			</section>
+			<section if="HXCPP_M64" unless="HXCPP_ARM64">
 				<lib name="${PROJECT_DIR}/lib/Windows/libvlc.lib" />
 				<lib name="${PROJECT_DIR}/lib/Windows/libvlccore.lib" />
 			</section>
