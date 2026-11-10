@@ -37,11 +37,23 @@ import cpp.Stdlib;
 import lime.media.openal.AL;
 import lime.media.openal.ALBuffer;
 import lime.media.openal.ALSource;
+#elseif lime_miniaudio
+import cpp.Pointer;
+import cpp.RawPointer;
+
+import lime.media.AudioBuffer;
+import lime.media.AudioSource;
+import lime.media.miniaudio.MAAudioRingBuffer;
+import lime.media.miniaudio.MAAudioRingBufferConfig;
 #end
 
 /** This class is a video player that uses LibVLC for seamless integration with OpenFL display objects. */
+#if lime_miniaudio
+@:access(lime.media.AudioBuffer)
+#end
 @:access(openfl.display3D.textures.TextureBase)
 @:access(openfl.display.BitmapData)
+@:haxe.warning("-WDeprecated")
 class Video extends Bitmap
 {
 	/** The media resource locator (MRL). */
@@ -153,7 +165,14 @@ class Video extends Bitmap
 	public var onMediaSubItemTreeAdded(default, null):Event<Media->Void> = new Event<Media->Void>();
 
 	/** Event triggered when the media format setup is initialized. */
+	@:deprecated('onFormatSetup is deprecated, use onVideoFormatSetup instead')
 	public var onFormatSetup(default, null):Event<Void->Void> = new Event<Void->Void>();
+
+	/** Event triggered when the video format setup is initialized. */
+	public var onVideoFormatSetup(default, null):Event<Void->Void> = new Event<Void->Void>();
+
+	/** Event triggered when the audio format setup is initialized. */
+	public var onAudioFormatSetup(default, null):Event<Void->Void> = new Event<Void->Void>();
 
 	@:noCompletion
 	private var instance:Null<Instance>;
@@ -196,6 +215,12 @@ class Video extends Bitmap
 
 	@:noCompletion
 	private var alFrameSize:Null<Int>;
+	#elseif lime_miniaudio
+	@:noCompletion
+	private var audioSource:Null<AudioSource>;
+
+	@:noCompletion
+	private var audioSourceInitialGain:Float = 1;
 	#end
 
 	/**
@@ -530,6 +555,20 @@ class Video extends Bitmap
 		}
 
 		alQueuedBuffers = null;
+		#elseif lime_miniaudio
+		@:nullSafety(Off)
+		if (audioSource != null)
+		{
+			audioSource.dispose();
+
+			if (audioSource.buffer != null)
+			{
+				audioSource.buffer.dispose();
+				audioSource.buffer = null;
+			}
+
+			audioSource = null;
+		}
 		#end
 	}
 
@@ -604,6 +643,8 @@ class Video extends Bitmap
 	{
 		#if lime_openal
 		return alSource != null ? AL.getSourcef(alSource, AL.GAIN) : 1;
+		#elseif lime_miniaudio
+		return audioSource != null ? audioSource.gain : audioSourceInitialGain;
 		#else
 		return 1;
 		#end
@@ -616,6 +657,15 @@ class Video extends Bitmap
 		if (alSource != null)
 		{
 			AL.sourcef(alSource, AL.GAIN, value);
+		}
+		#elseif lime_miniaudio
+		if (audioSource != null)
+		{
+			audioSource.gain = value;
+		}
+		else
+		{
+			audioSourceInitialGain = value;
 		}
 		#end
 
@@ -782,6 +832,8 @@ class Video extends Bitmap
 		bitmapData.__isValid = true;
 
 		onFormatSetup.dispatch();
+
+		onVideoFormatSetup.dispatch();
 	}
 
 	@:noCompletion
@@ -829,7 +881,7 @@ class Video extends Bitmap
 	@:noCompletion
 	private function audioOutput_onMapFormat(format:String):String
 	{
-		#if lime_openal
+		#if (lime_openal || lime_miniaudio)
 		return 'S16N';
 		#else
 		return format;
@@ -869,10 +921,63 @@ class Video extends Bitmap
 		alFrameSize = Stdlib.sizeof(cpp.Int16) * channels;
 
 		return true;
+		#elseif lime_miniaudio
+		@:nullSafety(Off)
+		if (audioSource != null)
+		{
+			audioSource.dispose();
+
+			if (audioSource.buffer != null)
+			{
+				audioSource.buffer.dispose();
+				audioSource.buffer = null;
+			}
+
+			audioSource = null;
+		}
+
+		final ringBufferConfig:MAAudioRingBufferConfig = MAAudioRingBufferConfig.init(S16, channels, rate, rate * 2);
+
+		final ringBuffer:MAAudioRingBuffer = MAAudioRingBuffer.init(ringBufferConfig);
+
+		if (ringBuffer != null)
+		{
+			audioSource = new AudioSource();
+
+			audioSource.buffer = createAudioBuffer(ringBuffer, ringBufferConfig);
+
+			audioSource.init();
+
+			audioSource.gain = audioSourceInitialGain;
+
+			onAudioFormatSetup.dispatch();
+
+			return true;
+		}
+
+		return false;
 		#else
 		return false;
 		#end
 	}
+
+	#if lime_miniaudio
+	@:noCompletion
+	private function createAudioBuffer(ringBuffer:MAAudioRingBuffer, ringBufferConfig:MAAudioRingBufferConfig):AudioBuffer
+	{
+		final audioBuffer:AudioBuffer = new AudioBuffer();
+
+		audioBuffer.frames = ringBuffer.get_length_in_pcm_frames();
+
+		audioBuffer.sampleRate = ringBufferConfig.sampleRate;
+		audioBuffer.channels = ringBufferConfig.channels;
+		audioBuffer.format = ringBufferConfig.format;
+
+		audioBuffer.__srcMAAudioRingBuffer = ringBuffer;
+
+		return audioBuffer;
+	}
+	#end
 
 	@:noCompletion
 	private function audioOutput_onPlay(samples:BytesData):Void
@@ -910,6 +1015,16 @@ class Video extends Bitmap
 					AL.sourcePlay(alSource);
 			}
 		}
+		#elseif lime_miniaudio
+		if (audioSource != null && audioSource.buffer?.__srcMAAudioRingBuffer != null)
+		{
+			audioSource.buffer.__srcMAAudioRingBuffer.write_pcm_frames(Pointer.ofArray(samples), samples.length);
+
+			if (audioSource != null && !audioSource.playing)
+			{
+				audioSource.play();
+			}
+		}
 		#end
 	}
 
@@ -920,6 +1035,11 @@ class Video extends Bitmap
 		if (alSource != null && AL.getSourcei(alSource, AL.SOURCE_STATE) != AL.PAUSED)
 		{
 			AL.sourcePause(alSource);
+		}
+		#elseif lime_miniaudio
+		if (audioSource != null && audioSource.playing)
+		{
+			audioSource.pause();
 		}
 		#end
 	}
@@ -932,6 +1052,11 @@ class Video extends Bitmap
 		{
 			AL.sourcePlay(alSource);
 		}
+		#elseif lime_miniaudio
+		if (audioSource != null && !audioSource.playing)
+		{
+			audioSource.play();
+		}
 		#end
 	}
 
@@ -942,6 +1067,33 @@ class Video extends Bitmap
 		if (alSource != null && AL.getSourcei(alSource, AL.SOURCE_STATE) != AL.STOPPED)
 		{
 			AL.sourceStop(alSource);
+		}
+		#elseif lime_miniaudio
+		if (audioSource != null)
+		{
+			if (audioSource.playing)
+			{
+				audioSource.pause();
+			}
+
+			if (audioSource.buffer?.__srcMAAudioRingBuffer != null)
+			{
+				// When we are changing the time of the LibVLC media player this function is called,
+				// if we dont drain the audio frames currently present,
+				// the audio will start to become glitchy.
+				final frameCount:Int = audioSource.buffer.__srcMAAudioRingBuffer.get_length_in_pcm_frames();
+
+				if (frameCount > 0)
+				{
+					final mappedBuffer:RawPointer<cpp.Void> = untyped NULL;
+
+					final mappedFrameCount:Int = audioSource.buffer.__srcMAAudioRingBuffer.map_consume(frameCount,
+						Pointer.fromRaw(RawPointer.addressOf(mappedBuffer)));
+
+					if (mappedFrameCount > 0)
+						audioSource.buffer.__srcMAAudioRingBuffer.unmap_consume(mappedFrameCount);
+				}
+			}
 		}
 		#end
 	}
